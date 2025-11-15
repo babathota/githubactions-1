@@ -28,7 +28,8 @@ jobs:
         uses: mathieudutour/github-tag-action@v6.1
         id: tag_version
         with:
-          default_bump: ${{ steps.get_labels.outputs.labels.bump }}
+          #default_bump: ${{ steps.get_labels.outputs.labels.bump }}
+          default_bump: ${{ steps.get_labels.outputs.label_value }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           dry_run: ${{ github.event_name == 'pull_request' }}
           tag_prefix: v
