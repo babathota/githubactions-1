@@ -33,6 +33,12 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           dry_run: ${{ github.event_name == 'pull_request' }}
           tag_prefix: v
+
+      - name: Debug label output
+        run: |
+          echo "Label value: ${{ steps.get_labels.outputs.label_value }}"
+          echo "New tag: ${{ steps.tag_version.outputs.new_tag }}"
+
           
       - name: Comment on PR
         if: ${{ github.event_name == 'pull_request' && steps.tag_version.outputs.new_tag != '' }}
@@ -41,6 +47,7 @@ jobs:
           issue-number: ${{ github.event.pull_request.number }}
           body: |
             **Next Release:** 🚀 ${{ steps.tag_version.outputs.new_tag }}
+            **Bump Type:** ${{ steps.get_labels.outputs.label_value }}
             
       - name: Create a GitHub release
         uses: ncipollo/release-action@v1
