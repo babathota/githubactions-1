@@ -22,7 +22,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           label_key: get_labels
           label_value_order: "patch,minor,major,ignore"
-          default_label_value: patch
+          #default_label_value: patch
 
       - name: Bump version and push tag
         uses: mathieudutour/github-tag-action@v6.1
