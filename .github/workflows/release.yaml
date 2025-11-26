@@ -33,6 +33,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           dry_run: ${{ github.event_name == 'pull_request' }}
           tag_prefix: v
+          release_branches: main
 
       - name: Debug label output
         run: |
