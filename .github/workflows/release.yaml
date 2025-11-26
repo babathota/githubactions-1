@@ -22,98 +22,64 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Get PR labels
-        id: pr_labels
-        if: github.event_name == 'pull_request'
+      - name: Get bump type from PR labels
+        id: bump_type
         run: |
-          LABELS=$(echo '${{ toJson(github.event.pull_request.labels.*.name) }}' | jq -r '.[]')
-          echo "Labels: $LABELS"
-          
-          if echo "$LABELS" | grep -q "major"; then
-            echo "bump_type=major" >> $GITHUB_OUTPUT
-          elif echo "$LABELS" | grep -q "minor"; then
-            echo "bump_type=minor" >> $GITHUB_OUTPUT
-          elif echo "$LABELS" | grep -q "patch"; then
-            echo "bump_type=patch" >> $GITHUB_OUTPUT
-          else
-            echo "bump_type=patch" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Get bump type from merged PR
-        id: merged_pr_labels
-        if: github.event_name == 'push'
-        run: |
-          # Get the commit message to find PR number
-          COMMIT_MSG=$(git log -1 --pretty=%B)
-          echo "Commit message: $COMMIT_MSG"
-          
-          # Extract PR number from merge commit (format: "Merge pull request #123")
-          PR_NUMBER=$(echo "$COMMIT_MSG" | grep -oP '(?<=#)\d+' | head -1)
-          
-          if [ -z "$PR_NUMBER" ]; then
-            echo "No PR number found, defaulting to patch"
-            echo "bump_type=patch" >> $GITHUB_OUTPUT
-          else
-            echo "PR Number: $PR_NUMBER"
-            
-            # Get PR labels using GitHub API
-            LABELS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              "https://api.github.com/repos/${{ github.repository }}/issues/$PR_NUMBER" | \
-              jq -r '.labels[].name')
-            
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            # For PR events, read labels directly
+            LABELS='${{ toJson(github.event.pull_request.labels.*.name) }}'
             echo "PR Labels: $LABELS"
             
-            if echo "$LABELS" | grep -q "major"; then
-              echo "bump_type=major" >> $GITHUB_OUTPUT
-            elif echo "$LABELS" | grep -q "minor"; then
-              echo "bump_type=minor" >> $GITHUB_OUTPUT
+            if echo "$LABELS" | grep -qi "major"; then
+              echo "bump=major" >> $GITHUB_OUTPUT
+            elif echo "$LABELS" | grep -qi "minor"; then
+              echo "bump=minor" >> $GITHUB_OUTPUT
+            elif echo "$LABELS" | grep -qi "patch"; then
+              echo "bump=patch" >> $GITHUB_OUTPUT
             else
-              echo "bump_type=patch" >> $GITHUB_OUTPUT
+              echo "bump=patch" >> $GITHUB_OUTPUT
+            fi
+          else
+            # For push events, get the merged PR labels
+            PR_NUMBER=$(gh pr list --state merged --limit 1 --json number --jq '.[0].number')
+            if [ -n "$PR_NUMBER" ]; then
+              LABELS=$(gh pr view $PR_NUMBER --json labels --jq '.labels[].name')
+              echo "Merged PR #$PR_NUMBER Labels: $LABELS"
+              
+              if echo "$LABELS" | grep -qi "major"; then
+                echo "bump=major" >> $GITHUB_OUTPUT
+              elif echo "$LABELS" | grep -qi "minor"; then
+                echo "bump=minor" >> $GITHUB_OUTPUT
+              else
+                echo "bump=patch" >> $GITHUB_OUTPUT
+              fi
+            else
+              echo "bump=patch" >> $GITHUB_OUTPUT
             fi
           fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get latest tag
-        id: get_tag
+      - name: Bump version and push tag
+        id: tag_version
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          default_bump: ${{ steps.bump_type.outputs.bump }}
+          release_branches: main
+          dry_run: ${{ github.event_name == 'pull_request' }}
+          tag_prefix: v
+          append_to_pre_release_tag: ""
+
+      - name: Debug output
         run: |
-          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
-          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
-          echo "Latest tag: $LATEST_TAG"
+          echo "Event: ${{ github.event_name }}"
+          echo "Bump type: ${{ steps.bump_type.outputs.bump }}"
+          echo "New tag: ${{ steps.tag_version.outputs.new_tag }}"
+          echo "Previous tag: ${{ steps.tag_version.outputs.previous_tag }}"
+          echo "New version: ${{ steps.tag_version.outputs.new_version }}"
 
-      - name: Calculate new version
-        id: new_version
-        run: |
-          LATEST_TAG="${{ steps.get_tag.outputs.latest_tag }}"
-          VERSION=${LATEST_TAG#v}
-          
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
-          
-          # Get bump type based on event
-          if [ "${{ github.event_name }}" == "pull_request" ]; then
-            BUMP_TYPE="${{ steps.pr_labels.outputs.bump_type }}"
-          else
-            BUMP_TYPE="${{ steps.merged_pr_labels.outputs.bump_type }}"
-          fi
-          
-          echo "Bump type: $BUMP_TYPE"
-          
-          if [ "$BUMP_TYPE" == "major" ]; then
-            MAJOR=$((MAJOR + 1))
-            MINOR=0
-            PATCH=0
-          elif [ "$BUMP_TYPE" == "minor" ]; then
-            MINOR=$((MINOR + 1))
-            PATCH=0
-          else
-            PATCH=$((PATCH + 1))
-          fi
-          
-          NEW_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
-          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
-          echo "bump_type=$BUMP_TYPE" >> $GITHUB_OUTPUT
-          echo "New version: $NEW_VERSION"
-
-      # PREVIEW on PR (doesn't create actual tag)
-      - name: Comment on PR with version preview
+      - name: Comment on PR
         if: github.event_name == 'pull_request'
         uses: peter-evans/create-or-update-comment@v3
         with:
@@ -121,33 +87,17 @@ jobs:
           body: |
             ## 🚀 Version Preview
             
-            **Current Version:** ${{ steps.get_tag.outputs.latest_tag }}
-            **Next Version:** ${{ steps.new_version.outputs.new_version }}
-            **Bump Type:** ${{ steps.new_version.outputs.bump_type }}
+            **Current Version:** ${{ steps.tag_version.outputs.previous_tag }}
+            **Next Version:** ${{ steps.tag_version.outputs.new_tag }}
+            **Bump Type:** `${{ steps.bump_type.outputs.bump }}`
             
-            > ⚠️ Tag and release will be created when this PR is merged
+            > ⚠️ This is a preview. Tag and release will be created when merged to main.
 
-      # ACTUAL tag creation on merge (push to main)
-      - name: Create and push tag
-        if: github.event_name == 'push'
-        run: |
-          NEW_VERSION="${{ steps.new_version.outputs.new_version }}"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "$NEW_VERSION" -m "Release $NEW_VERSION"
-          git push origin "$NEW_VERSION"
-
-      # ACTUAL release creation on merge (push to main)
       - name: Create a GitHub release
         uses: ncipollo/release-action@v1
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.tag_version.outputs.new_tag != ''
         with:
-          tag: ${{ steps.new_version.outputs.new_version }}
-          name: Release ${{ steps.new_version.outputs.new_version }}
-          body: |
-            ## 🎉 Release Notes
-            
-            **Version:** ${{ steps.new_version.outputs.new_version }}
-            **Previous Version:** ${{ steps.get_tag.outputs.latest_tag }}
-            **Bump Type:** ${{ steps.new_version.outputs.bump_type }}
+          tag: ${{ steps.tag_version.outputs.new_tag }}
+          name: Release ${{ steps.tag_version.outputs.new_tag }}
+          body: ${{ steps.tag_version.outputs.changelog }}
           generateReleaseNotes: true
