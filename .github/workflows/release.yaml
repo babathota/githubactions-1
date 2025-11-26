@@ -8,52 +8,108 @@ on:
     branches:
       - main
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v3
-
-      - name: Get labels
-        uses: SamirMarin/get-labels-action@v0.0.4
-        id: get_labels
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          label_key: get_labels
-          label_value_order: "patch,minor,major,ignore"
-          default_label_value: patch
+          fetch-depth: 0  # Fetch all history for tags
 
-      - name: Bump version and push tag
-        uses: mathieudutour/github-tag-action@v6.1
-        id: tag_version
-        with:
-          #default_bump: ${{ steps.get_labels.outputs.labels.bump }}
-          default_bump: ${{ steps.get_labels.outputs.label_value }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          dry_run: ${{ github.event_name == 'pull_request' }}
-          tag_prefix: v
-          release_branches: main
-
-      - name: Debug label output
+      - name: Get PR labels
+        id: pr_labels
+        if: github.event_name == 'pull_request'
         run: |
-          echo "Label value: ${{ steps.get_labels.outputs.label_value }}"
-          echo "New tag: ${{ steps.tag_version.outputs.new_tag }}"
-
+          LABELS=$(echo '${{ toJson(github.event.pull_request.labels.*.name) }}' | jq -r '.[]')
+          echo "Labels: $LABELS"
           
+          if echo "$LABELS" | grep -q "major"; then
+            echo "bump_type=major" >> $GITHUB_OUTPUT
+          elif echo "$LABELS" | grep -q "minor"; then
+            echo "bump_type=minor" >> $GITHUB_OUTPUT
+          elif echo "$LABELS" | grep -q "patch"; then
+            echo "bump_type=patch" >> $GITHUB_OUTPUT
+          else
+            echo "bump_type=patch" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get latest tag
+        id: get_tag
+        run: |
+          # Get the latest tag, or default to v0.0.0
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+          echo "Latest tag: $LATEST_TAG"
+
+      - name: Calculate new version
+        id: new_version
+        run: |
+          LATEST_TAG="${{ steps.get_tag.outputs.latest_tag }}"
+          # Remove 'v' prefix
+          VERSION=${LATEST_TAG#v}
+          
+          # Split version into major.minor.patch
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+          
+          # Determine bump type (use PR labels for PR events, default to patch for push)
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            BUMP_TYPE="${{ steps.pr_labels.outputs.bump_type }}"
+          else
+            # For push events, check the merged PR labels from commit message or default to patch
+            BUMP_TYPE="patch"
+          fi
+          
+          echo "Bump type: $BUMP_TYPE"
+          
+          # Bump the version
+          if [ "$BUMP_TYPE" == "major" ]; then
+            MAJOR=$((MAJOR + 1))
+            MINOR=0
+            PATCH=0
+          elif [ "$BUMP_TYPE" == "minor" ]; then
+            MINOR=$((MINOR + 1))
+            PATCH=0
+          else
+            PATCH=$((PATCH + 1))
+          fi
+          
+          NEW_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "bump_type=$BUMP_TYPE" >> $GITHUB_OUTPUT
+          echo "New version: $NEW_VERSION"
+
       - name: Comment on PR
-        if: ${{ github.event_name == 'pull_request' && steps.tag_version.outputs.new_tag != '' }}
+        if: github.event_name == 'pull_request'
         uses: peter-evans/create-or-update-comment@v3
         with:
           issue-number: ${{ github.event.pull_request.number }}
           body: |
-            **Next Release:** 🚀 ${{ steps.tag_version.outputs.new_tag }}
-            **Bump Type:** ${{ steps.get_labels.outputs.label_value }}
-            
+            **Next Release:** 🚀 ${{ steps.new_version.outputs.new_version }}
+            **Bump Type:** ${{ steps.new_version.outputs.bump_type }}
+            **Current Version:** ${{ steps.get_tag.outputs.latest_tag }}
+
+      - name: Create and push tag
+        if: github.event_name == 'push'
+        run: |
+          NEW_VERSION="${{ steps.new_version.outputs.new_version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$NEW_VERSION" -m "Release $NEW_VERSION"
+          git push origin "$NEW_VERSION"
+
       - name: Create a GitHub release
         uses: ncipollo/release-action@v1
-        if: ${{ github.event_name != 'pull_request' && steps.tag_version.outputs.new_tag != '' }}
+        if: github.event_name == 'push'
         with:
-          tag: ${{ steps.tag_version.outputs.new_tag }}
-          name: Release ${{ steps.tag_version.outputs.new_tag }}
-          body: ${{ steps.tag_version.outputs.changelog }}
+          tag: ${{ steps.new_version.outputs.new_version }}
+          name: Release ${{ steps.new_version.outputs.new_version }}
+          body: |
+            ## Changes
+            Version bumped from ${{ steps.get_tag.outputs.latest_tag }} to ${{ steps.new_version.outputs.new_version }}
+            Bump type: ${{ steps.new_version.outputs.bump_type }}
+          generateReleaseNotes: true
